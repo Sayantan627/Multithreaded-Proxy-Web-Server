@@ -101,6 +101,40 @@ int handle_request(int client_socketId, ParsedRequest *request, char *tempReq)
         server_port = atoi(request->port);
     }
     int remote_socketId = connectRemoteServer(request->host, server_port);
+    if (remote_socketId < 0)
+    {
+        return -1;
+    }
+    int bytes_send = send(remote_socketId, buf, sizeof(buf), 0);
+    bzero(buf, MAX_BYTES);
+    bytes_send = recv(remote_socketId, buf, MAX_BYTES - 1, 0);
+    char *temp_buf = (char *)malloc(sizeof(char) * MAX_BYTES);
+    int temp_buf_size = MAX_BYTES;
+    int temp_buf_idx = 0;
+    while (bytes_send > 0)
+    {
+        bytes_send = send(client_socketId, buf, bytes_send, 0);
+        for (int i = 0; i < bytes_send / sizeof(char); i++)
+        {
+            temp_buf[temp_buf_idx] = buf[i];
+            temp_buf_idx++;
+        }
+        temp_buf_size += MAX_BYTES;
+        temp_buf = (char *)realloc(temp_buf, temp_buf_size);
+        if (bytes_send < 0)
+        {
+            perror("Error in sending data to the client\n");
+            break;
+        }
+        bzero(buf, MAX_BYTES);
+        bytes_send = recv(remote_socketId, buf, MAX_BYTES - 1, 0);
+    }
+    temp_buf[temp_buf_idx] = '\0';
+    free(buf);
+    add_cache_element(temp_buf, strlen(temp_buf), tempReq);
+    free(temp_buf);
+    close(remote_socketId);
+    return 0;
 }
 
 void *thread_fn(void *socket_new)
