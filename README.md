@@ -1,41 +1,73 @@
-# Multithreaded Proxy Web Server
+# Proxy Server with Caching
 
-## Project Overview
+This project is a multi-threaded proxy server implemented in C that supports caching, allowing efficient retrieval and delivery of web content. The server handles HTTP requests by forwarding them to the requested server, caching responses for future requests to reduce latency and resource usage.
 
-This project aims to develop a multithreaded proxy web server that can handle multiple client requests concurrently. The server will forward requests from clients to the appropriate web servers and return the responses back to the clients.
+## Features
 
-## Current Status
+- **Proxy Server**: Forwards HTTP requests to the destination server and relays the responses to the client.
+- **Caching**: Caches HTTP responses for frequently requested resources, improving response times.
+- **Concurrency**: Uses multi-threading to handle multiple client requests concurrently.
+- **Request Parsing**: Interprets and processes incoming HTTP requests to determine if a response can be served from cache or needs forwarding.
 
-The project is currently under active development. Feedback are welcome.
+## Prerequisites
 
-### Completed Tasks
+- **C Compiler**: Make sure you have `gcc` installed for compilation.
+- **POSIX Threads (pthreads)**: The server is implemented using pthreads for concurrency.
+- **Libraries**: Ensure the necessary system libraries (such as `<pthread.h>`, `<semaphore.h>`, `<netinet/in.h>`) are available.
 
-- **Project Setup**: Initialized the project structure and set up the development environment.
-- **Basic Proxy Functionality**: Implemented basic proxy functionality to forward HTTP requests and responses.
-- **Multithreading**: Added multithreading support to handle multiple client connections simultaneously.
-- **Logging**: Implemented basic logging to track incoming requests and server responses.
+## Compilation and Setup
 
-### In Progress
+To compile and set up the project:
 
-- **Error Handling**: Improving error handling mechanisms to manage various edge cases and exceptions.
-- **Performance Optimization**: Optimizing the server for better performance and resource management.
+1. Clone the repository or download the files to your local machine.
+2. Open a terminal in the project directory and run:
 
-### To Do
+   ```bash
+   gcc -g -Wall -o proxy server_with_cache.c -lpthread
+   ```
 
-- **HTTPS Support**: Adding support for HTTPS connections.
-- **Caching**: Implementing caching mechanisms to improve response times for frequently requested resources.
-- **Security**: Enhancing security features to protect against common web vulnerabilities.
+   This will compile the source file with debugging information and link the pthread library.
 
-## How to Run
+3. Run the server with:
 
-1. Clone the repository.
-2. Navigate to the project directory.
-3. Compile the source code.
-4. Run the server executable.
+   ```bash
+   ./proxy <port>
+   ```
+
+   Replace `<port>` with the port number you want the server to listen on (e.g., 8080).
+
+## Usage
+
+To test the proxy server:
+
+1. Start the server on a specific port (e.g., 8080):
+
+   ```bash
+   ./proxy 8080
+   ```
+
+2. Open a web browser or use a command-line tool (e.g., `curl`) to send an HTTP request via the proxy:
+
+   ```bash
+   curl -x http://localhost:8080/https://www.cs.princeton.edu/
+   ```
+
+   The server will:
+
+   - Check if the requested content is in the cache.
+   - Fetch the content from the destination if it's not cached.
+   - Cache the new content for future requests.
+
+### Example
 
 ```bash
-git clone https://github.com/Sayantan627/Multithreaded-Proxy-Web-Server
-cd Multithreaded-Proxy-Web-Server
-make
-./proxy_server
+curl -x http://localhost:8080/https://example.com
 ```
+
+This sends a request for `https://example.com` through the proxy, and the server will return the response, storing it in the cache if applicable.
+
+## Troubleshooting
+
+- **"Bad Request" Response**: Ensure the request URL follows the format `http://localhost:<port>/<URL>` without any extra schemas.
+- **Permission Errors**: Ensure you have appropriate permissions to bind the server to the chosen port.
+- **Cache Invalidation**: If stale data is served, ensure cache entries are properly invalidated or refreshed.
