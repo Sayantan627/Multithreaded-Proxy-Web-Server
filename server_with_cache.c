@@ -137,6 +137,24 @@ int handle_request(int client_socketId, ParsedRequest *request, char *tempReq)
     return 0;
 }
 
+int checkHTTPVersion(char *msg)
+{
+    int version = -1;
+    if (strncmp(msg, "HTTP/1.1", 8) == 0)
+    {
+        version = 1;
+    }
+    else if (strncmp(msg, "HTTP/1.0", 8) == 0)
+    {
+        version = 1;
+    }
+    else
+    {
+        version = -1;
+    }
+    return version;
+}
+
 void *thread_fn(void *socket_new)
 {
     sem_wait(&semaphore);
