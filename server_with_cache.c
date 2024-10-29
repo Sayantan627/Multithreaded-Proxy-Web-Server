@@ -14,13 +14,12 @@
 #include <sys/wait.h>
 #include <errno.h>
 
-#define MAX_CLIENTS 10
+#define MAX_CLIENTS 400
 #define MAX_BYTES 4096
 #define MAX_ELEMENT_SIZE 10 * (1 << 20)
 #define MAX_SIZE 200 * (1 << 20)
 
 typedef struct cache_element cache_element;
-typedef struct ParsedRequest ParsedRequest;
 
 struct cache_element
 {
@@ -62,7 +61,7 @@ int connectRemoteServer(char *host_addr, int port_num)
     bzero((char *)&server_addr, sizeof(server_addr));
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(port_num);
-    bcopy((char *)&host->h_addr_list[0], (char *)&server_addr.sin_addr.s_addr, host->h_length);
+    bcopy((char *)host->h_addr_list[0], (char *)&server_addr.sin_addr.s_addr, host->h_length);
     if (connect(remote_socket, (struct sockaddr *)&server_addr, (socklen_t)sizeof(server_addr)) < 0)
     {
         fprintf(stderr, "Error in connecting\n");
@@ -71,10 +70,10 @@ int connectRemoteServer(char *host_addr, int port_num)
     return remote_socket;
 }
 
-int handle_request(int client_socketId, ParsedRequest *request, char *tempReq)
+int handle_request(int client_socketId, struct ParsedRequest *request, char *tempReq)
 {
     char *buf = (char *)malloc(sizeof(char) * MAX_BYTES);
-    strcpy(buf, "GET");
+    strcpy(buf, "GET ");
     strcat(buf, request->path);
     strcat(buf, " ");
     strcat(buf, request->version);
@@ -107,7 +106,7 @@ int handle_request(int client_socketId, ParsedRequest *request, char *tempReq)
     {
         return -1;
     }
-    int bytes_send = send(remote_socketId, buf, sizeof(buf), 0);
+    int bytes_send = send(remote_socketId, buf, strlen(buf), 0);
     bzero(buf, MAX_BYTES);
     bytes_send = recv(remote_socketId, buf, MAX_BYTES - 1, 0);
     char *temp_buf = (char *)malloc(sizeof(char) * MAX_BYTES);
@@ -116,7 +115,7 @@ int handle_request(int client_socketId, ParsedRequest *request, char *tempReq)
     while (bytes_send > 0)
     {
         bytes_send = send(client_socketId, buf, bytes_send, 0);
-        for (int i = 0; i < bytes_send / sizeof(char); i++)
+        for (unsigned long i = 0; i < (bytes_send / sizeof(char)); i++)
         {
             temp_buf[temp_buf_idx] = buf[i];
             temp_buf_idx++;
@@ -214,7 +213,7 @@ void *thread_fn(void *socket_new)
 {
     sem_wait(&semaphore);
     int p;
-    sem_getvalue(&semaphore, p);
+    sem_getvalue(&semaphore, &p);
     printf("Semaphore value: %d\n", p);
     int *t = (int *)socket_new;
     int socket = *t;
@@ -238,7 +237,7 @@ void *thread_fn(void *socket_new)
         }
     }
     char *tempReq = (char *)malloc(strlen(buffer) * sizeof(char) + 1);
-    for (int i = 0; i < strlen(buffer); i++)
+    for (size_t i = 0; i < strlen(buffer); i++)
     {
         tempReq[i] = buffer[i];
     }
@@ -264,7 +263,7 @@ void *thread_fn(void *socket_new)
     else if (bytes_send_client > 0)
     {
         len = strlen(buffer);
-        ParsedRequest *request = ParsedRequest_create();
+        struct ParsedRequest *request = ParsedRequest_create();
         if (ParsedRequest_parse(request, buffer, len) < 0)
         {
             printf("Parsing failed\n");
@@ -302,7 +301,7 @@ void *thread_fn(void *socket_new)
     close(socket);
     free(buffer);
     sem_post(&semaphore);
-    sem_getvalue(&semaphore, p);
+    sem_getvalue(&semaphore, &p);
     printf("Semaphore post value: %d\n", p);
     free(tempReq);
     return NULL;
@@ -315,7 +314,7 @@ int main(int argc, char *argv[])
     sem_init(&semaphore, 0, MAX_CLIENTS);
     pthread_mutex_init(&lock, NULL);
 
-    if (argv == 2)
+    if (argc == 2)
     {
         port = atoi(argv[1]);
     }
