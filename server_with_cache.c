@@ -14,63 +14,244 @@
 #include <sys/wait.h>
 #include <errno.h>
 
-#define MAX_CLIENTS 400
-#define MAX_BYTES 4096
-#define MAX_ELEMENT_SIZE 10 * (1 << 20)
-#define MAX_SIZE 200 * (1 << 20)
+#define MAX_CLIENTS 400                 // max number of client requests served at a time
+#define MAX_BYTES 4096                  // max allowed size of request
+#define MAX_ELEMENT_SIZE 10 * (1 << 20) // max size of an element in cache
+#define MAX_SIZE 200 * (1 << 20)        // size of cache
 
-typedef struct cache_element cache_element;
+typedef struct cache_store_element cache_store_element;
 
-struct cache_element
+struct cache_store_element
 {
     char *data;
     int len;
     char *url;
     time_t lru_time_track;
-    cache_element *next;
+    cache_store_element *next;
 };
 
-cache_element *find(char *url);
-int add_cache_element(char *data, int size, char *url);
-void remove_cache_element();
+cache_store_element *find(char *url);
+int add_cache_store_element(char *data, int size, char *url);
+void remove_cache_store_element();
 
 int port = 8080;
 int proxy_socketId;
 pthread_t tid[MAX_CLIENTS];
 sem_t semaphore;
-pthread_mutex_t lock;
+pthread_mutex_t lock; // for locking cache
 
-cache_element *head;
+cache_store_element *head;
 int cache_size;
 
-int connectRemoteServer(char *host_addr, int port_num)
+cache_store_element *find(char *url)
 {
-    int remote_socket = socket(AF_INET, SOCK_STREAM, 0);
-    if (remote_socket < 0)
+    // Checks for URL in the cache; if found, returns pointer to the respective cache element, otherwise returns NULL
+    cache_store_element *site = NULL;
+
+    // Acquire lock 🛠️
+    int temp_lock_val = pthread_mutex_lock(&lock);
+    printf("🔒 Cache Lock Acquired (Status: %d)\n", temp_lock_val);
+
+    if (head != NULL)
     {
-        printf("Error creating socket\n");
+        site = head;
+        while (site != NULL)
+        {
+            if (!strcmp(site->url, url))
+            {
+                printf("🎯 URL found! 🔗 [%s]\n", url);
+
+                // Logging LRU Time before update ⏲️
+                printf("⏱️ LRU Time Before Update: %ld\n", site->lru_time_track);
+
+                // Updating the LRU time track
+                site->lru_time_track = time(NULL);
+
+                // Logging LRU Time after update ⏲️
+                printf("✅ LRU Time After Update: %ld\n", site->lru_time_track);
+                break;
+            }
+            site = site->next;
+        }
+    }
+    else
+    {
+        printf("❌ URL not found in cache: [%s]\n", url);
+    }
+
+    // Release lock 🛠️
+    temp_lock_val = pthread_mutex_unlock(&lock);
+    printf("🔓 Cache Lock Released (Status: %d)\n", temp_lock_val);
+
+    return site;
+}
+
+void remove_cache_store_element()
+{
+    // If cache is not empty, searches for the node which has the least lru_time_track and deletes it
+    cache_store_element *p;    // Previous cache_store_element pointer
+    cache_store_element *q;    // Next cache_store_element pointer
+    cache_store_element *temp; // Cache element to remove
+
+    // Acquire lock 🛠️
+    int temp_lock_val = pthread_mutex_lock(&lock);
+    printf("🔒 Cache Lock Acquired for Removal (Status: %d)\n", temp_lock_val);
+
+    if (head != NULL)
+    { // Cache is not empty
+        printf("🔍 Searching for the oldest cached element...\n");
+
+        // Start traversal to find the least recently used cache element
+        for (q = head, p = head, temp = head; q->next != NULL; q = q->next)
+        {
+            // Compare LRU times and track the oldest
+            if ((q->next->lru_time_track) < (temp->lru_time_track))
+            {
+                temp = q->next;
+                p = q;
+            }
+        }
+
+        if (temp == head)
+        {
+            printf("🗑️ Oldest element is at the head. Removing it...\n");
+            head = head->next; // Handle base case where head is the oldest
+        }
+        else
+        {
+            printf("🗑️ Oldest element found in cache. Removing: [%s]\n", temp->url);
+            p->next = temp->next;
+        }
+
+        // Update the cache size after removal
+        cache_size = cache_size - (temp->len) - sizeof(cache_store_element) - strlen(temp->url) - 1;
+        printf("📏 Updated Cache Size: %d bytes\n", cache_size);
+
+        // Free the memory allocated for the removed cache element
+        free(temp->data);
+        free(temp->url);
+        free(temp);
+
+        printf("✅ Cache element removed successfully!\n");
+    }
+    else
+    {
+        printf("⚠️ Cache is already empty, nothing to remove.\n");
+    }
+
+    // Release lock 🛠️
+    temp_lock_val = pthread_mutex_unlock(&lock);
+    printf("🔓 Cache Lock Released after Removal (Status: %d)\n", temp_lock_val);
+}
+
+int add_cache_store_element(char *data, int size, char *url)
+{
+    // Adds an element to the cache
+
+    // Acquire lock 🛠️
+    int temp_lock_val = pthread_mutex_lock(&lock);
+    printf("🔒 Add Cache Lock Acquired (Status: %d)\n", temp_lock_val);
+
+    // Calculate the total size of the new cache element
+    int element_size = size + 1 + strlen(url) + sizeof(cache_store_element);
+
+    if (element_size > MAX_ELEMENT_SIZE)
+    {
+        // Element size exceeds the maximum allowed cache size
+        printf("❌ Element too large to cache! Size: %d bytes (Max allowed: %d bytes)\n", element_size, MAX_ELEMENT_SIZE);
+
+        // Release lock 🛠️
+        temp_lock_val = pthread_mutex_unlock(&lock);
+        printf("🔓 Add Cache Lock Released (Status: %d)\n", temp_lock_val);
+
+        return 0;
+    }
+    else
+    {
+        // Remove elements until there's enough space to add the new one
+        while (cache_size + element_size > MAX_SIZE)
+        {
+            printf("⚠️ Cache full! Removing least recently used element to make space...\n");
+            remove_cache_store_element();
+        }
+
+        // Allocate memory for the new cache element
+        cache_store_element *element = (cache_store_element *)malloc(sizeof(cache_store_element));
+        element->data = (char *)malloc(size + 1); // Memory for the cached data
+        strcpy(element->data, data);
+
+        // Allocate memory for the URL
+        element->url = (char *)malloc(1 + (strlen(url) * sizeof(char)));
+        strcpy(element->url, url);
+
+        // Update LRU time
+        element->lru_time_track = time(NULL);
+        printf("🕒 Cache Element Time Track Set: %ld\n", element->lru_time_track);
+
+        // Insert the new element at the head of the cache
+        element->next = head;
+        element->len = size;
+        head = element;
+
+        // Update cache size
+        cache_size += element_size;
+        printf("📦 New element added to cache! Total cache size: %d bytes\n", cache_size);
+
+        // Release lock 🛠️
+        temp_lock_val = pthread_mutex_unlock(&lock);
+        printf("🔓 Add Cache Lock Released (Status: %d)\n", temp_lock_val);
+
+        return 1;
+    }
+
+    return 0;
+}
+
+int connectRemoteServer(char *host_addr, int port)
+{
+    // Create socket for remote server
+    int remoteSocket = socket(AF_INET, SOCK_STREAM, 0);
+    if (remoteSocket < 0)
+    {
+        perror("🚨 Error: Failed to create socket");
         return -1;
     }
+    printf("✅ Socket created successfully. (Socket FD: %d)\n", remoteSocket);
+
+    // Get host by the provided hostname or IP address
     struct hostent *host = gethostbyname(host_addr);
     if (host == NULL)
     {
-        fprintf(stderr, "No such host exist\n");
+        fprintf(stderr, "❌ Error: No such host \"%s\" exists.\n", host_addr);
+        close(remoteSocket);
         return -1;
     }
+    printf("🔍 Host found: %s\n", host_addr);
+
+    // Insert IP address and port number of the host into `server_addr`
     struct sockaddr_in server_addr;
     bzero((char *)&server_addr, sizeof(server_addr));
     server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(port_num);
+    server_addr.sin_port = htons(port);
     bcopy((char *)host->h_addr_list[0], (char *)&server_addr.sin_addr.s_addr, host->h_length);
-    if (connect(remote_socket, (struct sockaddr *)&server_addr, (socklen_t)sizeof(server_addr)) < 0)
+
+    printf("🌐 Preparing to connect to %s on port %d...\n", inet_ntoa(server_addr.sin_addr), port);
+
+    // Connect to remote server
+    if (connect(remoteSocket, (struct sockaddr *)&server_addr, (socklen_t)sizeof(server_addr)) < 0)
     {
-        fprintf(stderr, "Error in connecting\n");
+        perror("❌ Error: Failed to connect to remote server");
+        close(remoteSocket);
         return -1;
     }
-    return remote_socket;
+
+    printf("🔗 Successfully connected to remote server at %s on port %d.\n", inet_ntoa(server_addr.sin_addr), port);
+
+    // Return the socket descriptor for further communication
+    return remoteSocket;
 }
 
-int handle_request(int client_socketId, struct ParsedRequest *request, char *tempReq)
+int handle_request(int clientSocket, struct ParsedRequest *request, char *tempReq)
 {
     char *buf = (char *)malloc(sizeof(char) * MAX_BYTES);
     strcpy(buf, "GET ");
@@ -78,63 +259,102 @@ int handle_request(int client_socketId, struct ParsedRequest *request, char *tem
     strcat(buf, " ");
     strcat(buf, request->version);
     strcat(buf, "\r\n");
+
     size_t len = strlen(buf);
 
+    // Setting the "Connection" header to close
     if (ParsedHeader_set(request, "Connection", "close") < 0)
     {
-        printf("Set host header key isn't working\n");
+        printf("⚠️ Warning: Failed to set 'Connection' header to 'close'.\n");
     }
+
+    // Ensure the "Host" header is set
     if (ParsedHeader_get(request, "Host") == NULL)
     {
         if (ParsedHeader_set(request, "Host", request->host) < 0)
         {
-            printf("Set host header key isn't working\n");
+            printf("⚠️ Warning: Failed to set 'Host' header.\n");
         }
     }
+
+    // Unparse the headers
     if (ParsedRequest_unparse_headers(request, buf + len, (size_t)MAX_BYTES - len) < 0)
     {
-        printf("unparse failed\n");
-        // return -1;				// If this happens Still try to send request without header
+        printf("⚠️ Warning: Failed to unparse headers.\n");
+        // Still try to send the request without the header
     }
-    int server_port = 80;
+
+    int server_port = 80; // Default remote server port
     if (request->port != NULL)
     {
         server_port = atoi(request->port);
     }
-    int remote_socketId = connectRemoteServer(request->host, server_port);
-    if (remote_socketId < 0)
+
+    // Connect to the remote server
+    int remoteSocketID = connectRemoteServer(request->host, server_port);
+    if (remoteSocketID < 0)
     {
+        printf("❌ Error: Unable to connect to remote server at %s:%d.\n", request->host, server_port);
         return -1;
     }
-    int bytes_send = send(remote_socketId, buf, strlen(buf), 0);
+    printf("🔗 Connected to remote server %s on port %d.\n", request->host, server_port);
+
+    // Send the request to the remote server
+    int bytes_send = send(remoteSocketID, buf, strlen(buf), 0);
+    if (bytes_send < 0)
+    {
+        perror("❌ Error: Failed to send request to remote server.\n");
+        close(remoteSocketID);
+        free(buf);
+        return -1;
+    }
+    printf("📤 Sent request to server (%d bytes).\n", bytes_send);
+
+    // Prepare to receive the response
     bzero(buf, MAX_BYTES);
-    bytes_send = recv(remote_socketId, buf, MAX_BYTES - 1, 0);
-    char *temp_buf = (char *)malloc(sizeof(char) * MAX_BYTES);
-    int temp_buf_size = MAX_BYTES;
-    int temp_buf_idx = 0;
+    bytes_send = recv(remoteSocketID, buf, MAX_BYTES - 1, 0);
+    char *temp_buffer = (char *)malloc(sizeof(char) * MAX_BYTES); // Temp buffer
+    int temp_buffer_size = MAX_BYTES;
+    int temp_buffer_index = 0;
+
     while (bytes_send > 0)
     {
-        bytes_send = send(client_socketId, buf, bytes_send, 0);
-        for (unsigned long i = 0; i < (bytes_send / sizeof(char)); i++)
-        {
-            temp_buf[temp_buf_idx] = buf[i];
-            temp_buf_idx++;
-        }
-        temp_buf_size += MAX_BYTES;
-        temp_buf = (char *)realloc(temp_buf, temp_buf_size);
+        // Send the response to the client
+        bytes_send = send(clientSocket, buf, bytes_send, 0);
         if (bytes_send < 0)
         {
-            perror("Error in sending data to the client\n");
+            perror("❌ Error: Failed to send data to client socket.\n");
             break;
         }
+        printf("📨 Sent data to client socket (%d bytes).\n", bytes_send);
+
+        // Store the response in the temp buffer
+        for (int i = 0; i < (int)(bytes_send / sizeof(char)); i++)
+        {
+            temp_buffer[temp_buffer_index] = buf[i];
+            temp_buffer_index++;
+        }
+
+        // Reallocate temp buffer if needed
+        temp_buffer_size += MAX_BYTES;
+        temp_buffer = (char *)realloc(temp_buffer, temp_buffer_size);
+
+        // Zero out the buffer and prepare for the next chunk of data
         bzero(buf, MAX_BYTES);
-        bytes_send = recv(remote_socketId, buf, MAX_BYTES - 1, 0);
+        bytes_send = recv(remoteSocketID, buf, MAX_BYTES - 1, 0);
     }
-    temp_buf[temp_buf_idx] = '\0';
+
+    // Null-terminate the temp buffer and store in cache
+    temp_buffer[temp_buffer_index] = '\0';
+    add_cache_store_element(temp_buffer, strlen(temp_buffer), tempReq);
+    printf("🗃️ Response added to cache (size: %lu bytes).\n", strlen(temp_buffer));
+
+    // Clean up
     free(buf);
-    add_cache_element(temp_buf, strlen(temp_buf), tempReq);
-    free(temp_buf);
-    close(remote_socketId);
+    free(temp_buffer);
+    close(remoteSocketID);
+    printf("✅ Request handling completed.\n");
+
     return 0;
 }
 
@@ -162,328 +382,334 @@ int sendErrorMessage(int socket, int status_code)
     char currentTime[50];
     time_t now = time(0);
 
+    // Get the current time in the proper format
     struct tm data = *gmtime(&now);
     strftime(currentTime, sizeof(currentTime), "%a, %d %b %Y %H:%M:%S %Z", &data);
 
     switch (status_code)
     {
     case 400:
-        snprintf(str, sizeof(str), "HTTP/1.1 400 Bad Request\r\nContent-Length: 95\r\nConnection: keep-alive\r\nContent-Type: text/html\r\nDate: %s\r\nServer: Sayantan/14785\r\n\r\n<HTML><HEAD><TITLE>400 Bad Request</TITLE></HEAD>\n<BODY><H1>400 Bad Rqeuest</H1>\n</BODY></HTML>", currentTime);
-        printf("400 Bad Request\n");
+        // 400 Bad Request
+        snprintf(str, sizeof(str),
+                 "HTTP/1.1 400 Bad Request\r\n"
+                 "Content-Length: 150\r\n"
+                 "Connection: keep-alive\r\n"
+                 "Content-Type: text/html\r\n"
+                 "Date: %s\r\n"
+                 "Server: CustomServer/14785\r\n\r\n"
+                 "<HTML><HEAD><TITLE>400 Bad Request</TITLE></HEAD>\n"
+                 "<BODY><H1>🚫 400 - Bad Request!</H1>\n"
+                 "<P>It seems your request couldn't be processed due to an invalid format. "
+                 "Please check your request syntax and try again.</P></BODY></HTML>",
+                 currentTime);
+        printf("⚠️ Oops! 400 Bad Request (Client Error)\n");
         send(socket, str, strlen(str), 0);
         break;
 
     case 403:
-        snprintf(str, sizeof(str), "HTTP/1.1 403 Forbidden\r\nContent-Length: 112\r\nContent-Type: text/html\r\nConnection: keep-alive\r\nDate: %s\r\nServer: Sayantan/14785\r\n\r\n<HTML><HEAD><TITLE>403 Forbidden</TITLE></HEAD>\n<BODY><H1>403 Forbidden</H1><br>Permission Denied\n</BODY></HTML>", currentTime);
-        printf("403 Forbidden\n");
+        // 403 Forbidden
+        snprintf(str, sizeof(str),
+                 "HTTP/1.1 403 Forbidden\r\n"
+                 "Content-Length: 180\r\n"
+                 "Connection: keep-alive\r\n"
+                 "Content-Type: text/html\r\n"
+                 "Date: %s\r\n"
+                 "Server: CustomServer/14785\r\n\r\n"
+                 "<HTML><HEAD><TITLE>403 Forbidden</TITLE></HEAD>\n"
+                 "<BODY><H1>🚫 403 - Access Denied!</H1>\n"
+                 "<P>You don't have permission to access the requested resource. "
+                 "If you believe this is an error, contact the site administrator.</P></BODY></HTML>",
+                 currentTime);
+        printf("🚫 403 Forbidden (Access Denied!)\n");
         send(socket, str, strlen(str), 0);
         break;
 
     case 404:
-        snprintf(str, sizeof(str), "HTTP/1.1 404 Not Found\r\nContent-Length: 91\r\nContent-Type: text/html\r\nConnection: keep-alive\r\nDate: %s\r\nServer: Sayantan/14785\r\n\r\n<HTML><HEAD><TITLE>404 Not Found</TITLE></HEAD>\n<BODY><H1>404 Not Found</H1>\n</BODY></HTML>", currentTime);
-        printf("404 Not Found\n");
+        // 404 Not Found
+        snprintf(str, sizeof(str),
+                 "HTTP/1.1 404 Not Found\r\n"
+                 "Content-Length: 160\r\n"
+                 "Connection: keep-alive\r\n"
+                 "Content-Type: text/html\r\n"
+                 "Date: %s\r\n"
+                 "Server: CustomServer/14785\r\n\r\n"
+                 "<HTML><HEAD><TITLE>404 Not Found</TITLE></HEAD>\n"
+                 "<BODY><H1>🔍 404 - Page Not Found!</H1>\n"
+                 "<P>Sorry, the page you're looking for doesn't exist. "
+                 "Please check the URL or return to the homepage.</P></BODY></HTML>",
+                 currentTime);
+        printf("🔍 404 Not Found (Page Missing!)\n");
         send(socket, str, strlen(str), 0);
         break;
 
     case 500:
-        snprintf(str, sizeof(str), "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 115\r\nConnection: keep-alive\r\nContent-Type: text/html\r\nDate: %s\r\nServer: Sayantan/14785\r\n\r\n<HTML><HEAD><TITLE>500 Internal Server Error</TITLE></HEAD>\n<BODY><H1>500 Internal Server Error</H1>\n</BODY></HTML>", currentTime);
-        // printf("500 Internal Server Error\n");
+        // 500 Internal Server Error
+        snprintf(str, sizeof(str),
+                 "HTTP/1.1 500 Internal Server Error\r\n"
+                 "Content-Length: 200\r\n"
+                 "Connection: keep-alive\r\n"
+                 "Content-Type: text/html\r\n"
+                 "Date: %s\r\n"
+                 "Server: CustomServer/14785\r\n\r\n"
+                 "<HTML><HEAD><TITLE>500 Internal Server Error</TITLE></HEAD>\n"
+                 "<BODY><H1>💥 500 - Server Error!</H1>\n"
+                 "<P>Something went wrong on our end. We're working on fixing the issue. "
+                 "Please try again later or contact support.</P></BODY></HTML>",
+                 currentTime);
+        printf("💥 500 Internal Server Error (Something went wrong on our end!)\n");
         send(socket, str, strlen(str), 0);
         break;
 
     case 501:
-        snprintf(str, sizeof(str), "HTTP/1.1 501 Not Implemented\r\nContent-Length: 103\r\nConnection: keep-alive\r\nContent-Type: text/html\r\nDate: %s\r\nServer: Sayantan/14785\r\n\r\n<HTML><HEAD><TITLE>404 Not Implemented</TITLE></HEAD>\n<BODY><H1>501 Not Implemented</H1>\n</BODY></HTML>", currentTime);
-        printf("501 Not Implemented\n");
+        // 501 Not Implemented
+        snprintf(str, sizeof(str),
+                 "HTTP/1.1 501 Not Implemented\r\n"
+                 "Content-Length: 170\r\n"
+                 "Connection: keep-alive\r\n"
+                 "Content-Type: text/html\r\n"
+                 "Date: %s\r\n"
+                 "Server: CustomServer/14785\r\n\r\n"
+                 "<HTML><HEAD><TITLE>501 Not Implemented</TITLE></HEAD>\n"
+                 "<BODY><H1>🚧 501 - Feature Not Implemented!</H1>\n"
+                 "<P>Sorry, the feature you're trying to use is not implemented yet. "
+                 "Stay tuned for future updates!</P></BODY></HTML>",
+                 currentTime);
+        printf("❗ 501 Not Implemented (Feature coming soon!)\n");
         send(socket, str, strlen(str), 0);
         break;
 
     case 505:
-        snprintf(str, sizeof(str), "HTTP/1.1 505 HTTP Version Not Supported\r\nContent-Length: 125\r\nConnection: keep-alive\r\nContent-Type: text/html\r\nDate: %s\r\nServer: Sayantan/14785\r\n\r\n<HTML><HEAD><TITLE>505 HTTP Version Not Supported</TITLE></HEAD>\n<BODY><H1>505 HTTP Version Not Supported</H1>\n</BODY></HTML>", currentTime);
-        printf("505 HTTP Version Not Supported\n");
+        // 505 HTTP Version Not Supported
+        snprintf(str, sizeof(str),
+                 "HTTP/1.1 505 HTTP Version Not Supported\r\n"
+                 "Content-Length: 190\r\n"
+                 "Connection: keep-alive\r\n"
+                 "Content-Type: text/html\r\n"
+                 "Date: %s\r\n"
+                 "Server: CustomServer/14785\r\n\r\n"
+                 "<HTML><HEAD><TITLE>505 HTTP Version Not Supported</TITLE></HEAD>\n"
+                 "<BODY><H1>🔄 505 - Unsupported HTTP Version!</H1>\n"
+                 "<P>Your browser is using an HTTP version that this server doesn't support. "
+                 "Please upgrade your browser or try a different one.</P></BODY></HTML>",
+                 currentTime);
+        printf("🔄 505 HTTP Version Not Supported (Please upgrade your browser!)\n");
         send(socket, str, strlen(str), 0);
         break;
 
     default:
+        printf("❓ Unknown status code: %d\n", status_code);
         return -1;
     }
     return 1;
 }
 
-void *thread_fn(void *socket_new)
+void *thread_fn(void *socketNew)
 {
+    // Waiting for the semaphore
     sem_wait(&semaphore);
-    int p;
-    sem_getvalue(&semaphore, &p);
-    printf("Semaphore value: %d\n", p);
-    int *t = (int *)socket_new;
-    int socket = *t;
-    int bytes_send_client, len;
+    int semaphore_value;
+    sem_getvalue(&semaphore, &semaphore_value);
+    printf("🔐 Semaphore value before processing: %d\n", semaphore_value);
 
+    int *t = (int *)(socketNew);
+    int socket = *t;            // Socket descriptor of the connected client
+    int bytes_sent_client, len; // Bytes transferred
+
+    // Create buffer for client communication
     char *buffer = (char *)calloc(MAX_BYTES, sizeof(char));
-    bzero(buffer, MAX_BYTES);
+    bzero(buffer, MAX_BYTES); // Clear the buffer
 
-    bytes_send_client = recv(socket, buffer, MAX_BYTES, 0);
-
-    while (bytes_send_client > 0)
+    // Receive the client's request
+    bytes_sent_client = recv(socket, buffer, MAX_BYTES, 0);
+    while (bytes_sent_client > 0)
     {
         len = strlen(buffer);
+        // Loop until the "\r\n\r\n" sequence is found in the buffer (end of request)
         if (strstr(buffer, "\r\n\r\n") == NULL)
         {
-            bytes_send_client = recv(socket, buffer + len, MAX_BYTES - len, 0);
+            bytes_sent_client = recv(socket, buffer + len, MAX_BYTES - len, 0);
         }
         else
         {
             break;
         }
     }
+
+    printf("\n📜===============================================================📜\n");
+    printf("📥 RECEIVED BUFFER CONTENT:\n\n%s\n\n", buffer);
+    printf("\n📏====================== BUFFER LENGTH: %d ======================\n", (int)strlen(buffer));
+
+    // Copy the HTTP request to `tempReq` for potential cache lookup
     char *tempReq = (char *)malloc(strlen(buffer) * sizeof(char) + 1);
     for (size_t i = 0; i < strlen(buffer); i++)
     {
         tempReq[i] = buffer[i];
     }
-    struct cache_element *temp = find(tempReq);
-    if (temp != NULL)
-    { // got the temp request in lru cache
-        int size = temp->len / sizeof(char);
+
+    // Check for the request in the cache
+    struct cache_store_element *cached_response = find(tempReq);
+    printf("\n\nChecking...\n\n");
+    if (cached_response != NULL)
+    {
+        // Request found in cache, sending response from proxy's cache
+        int cache_size = cached_response->len / sizeof(char);
         int pos = 0;
         char response[MAX_BYTES];
-        while (pos < size)
+
+        while (pos < cache_size)
         {
             bzero(response, MAX_BYTES);
-            for (int i = 0; i < MAX_BYTES; i++)
+            for (int i = 0; i < MAX_BYTES && pos < cache_size; i++)
             {
-                response[i] = temp->data[i];
-                pos++;
+                response[i] = cached_response->data[pos++];
             }
             send(socket, response, MAX_BYTES, 0);
         }
-        printf("Data retrieved from the cache\n");
-        printf("%s\n\n", response);
+        printf("📦 Data retrieved from the Cache!\n\n%s\n\n", response);
     }
-    else if (bytes_send_client > 0)
+    // If no cache and valid request
+    else if (bytes_sent_client > 0)
     {
         len = strlen(buffer);
         struct ParsedRequest *request = ParsedRequest_create();
+
+        // Parse the request, on success (returns 0) store it in 'request'
         if (ParsedRequest_parse(request, buffer, len) < 0)
         {
-            printf("Parsing failed\n");
+            printf("❌ Error: Failed to parse the request.\n");
         }
         else
         {
-            bzero(buffer, MAX_BYTES);
-            if (strcmp(request->method, "GET") == 0)
-            {
+            bzero(buffer, MAX_BYTES); // Clear the buffer
+
+            if (!strcmp(request->method, "GET"))
+            { // Only supporting GET method
+                // Ensure host, path, and valid HTTP version are present
                 if (request->host && request->path && checkHTTPVersion(request->version) == 1)
                 {
-                    bytes_send_client = handle_request(socket, request, tempReq);
-                    if (bytes_send_client == -1)
+                    bytes_sent_client = handle_request(socket, request, tempReq); // Handle GET request
+                    if (bytes_sent_client == -1)
                     {
-                        sendErrorMessage(socket, 500);
+                        sendErrorMessage(socket, 500); // Send 500 Internal Server Error
                     }
                 }
                 else
                 {
-                    sendErrorMessage(socket, 500);
+                    sendErrorMessage(socket, 500); // Invalid request, send 500 error
                 }
             }
             else
             {
-                printf("This does not support any method apart from GET\n");
+                printf("⚠️ This code only supports GET method. Received: %s\n", request->method);
             }
         }
+        // Free the parsed request
         ParsedRequest_destroy(request);
     }
-    else if (bytes_send_client == 0)
+    // Handling error in receiving request
+    else if (bytes_sent_client < 0)
     {
-        printf("Client is disconnected\n");
+        perror("❌ Error: Failed to receive data from client.\n");
     }
+    // Client disconnected
+    else if (bytes_sent_client == 0)
+    {
+        printf("🔌 Client disconnected!\n");
+    }
+
+    // Clean up
     shutdown(socket, SHUT_RDWR);
     close(socket);
     free(buffer);
-    sem_post(&semaphore);
-    sem_getvalue(&semaphore, &p);
-    printf("Semaphore post value: %d\n", p);
+    sem_post(&semaphore); // Release the semaphore
+
+    // Check the semaphore value after processing
+    sem_getvalue(&semaphore, &semaphore_value);
+    printf("🔓 Semaphore value after processing: %d\n", semaphore_value);
     free(tempReq);
     return NULL;
 }
 
 int main(int argc, char *argv[])
 {
-    int client_socketId, client_len;
+    int client_socketID, client_len;
     struct sockaddr_in server_addr, client_addr;
     sem_init(&semaphore, 0, MAX_CLIENTS);
-    pthread_mutex_init(&lock, NULL);
 
+    pthread_mutex_init(&lock, NULL); // using NULL because in C their exists garbage value by default
     if (argc == 2)
     {
         port = atoi(argv[1]);
+        // ./proxy 8282 (for example)
+        // so, here port = 8282 (for this particular case only)
     }
     else
     {
-        printf("Too few arguments\n");
+        printf("❌ Error: Insufficient arguments provided.\n");
+        printf("💡 Tip: Try again with the correct arguments (e.g., ./proxy <port>)!\n");
         exit(1);
     }
 
-    printf("Starting Proxy Server at port: %d\n", port);
-
+    printf("🚀 Starting Proxy Server at Port: %d\n", port);
     proxy_socketId = socket(AF_INET, SOCK_STREAM, 0);
     if (proxy_socketId < 0)
     {
-        perror("Failed to create socket\n");
+        perror("❌ Error: Failed to create a Socket.\n");
         exit(1);
     }
+
     int reuse = 1;
     if (setsockopt(proxy_socketId, SOL_SOCKET, SO_REUSEADDR, (const char *)&reuse, sizeof(reuse)) < 0)
     {
-        perror("SetSockOpt failed\n");
+        perror("⚠️ Warning: setSockOpt failed.\n");
     }
 
     bzero((char *)&server_addr, sizeof(server_addr));
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(port);
     server_addr.sin_addr.s_addr = INADDR_ANY;
-
     if (bind(proxy_socketId, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0)
     {
-        perror("Port is not available\n");
+        perror("❌ Error: Port is not available, please try another Port Number!!\n");
         exit(1);
     }
-    printf("Binding at port: %d\n", port);
+    printf("🔗 Binding on port %d... ✅\n", port);
 
     int listen_status = listen(proxy_socketId, MAX_CLIENTS);
     if (listen_status < 0)
     {
-        perror("Listening error\n");
+        perror("❌ Error: Listening failed.\n");
         exit(1);
     }
+
     int i = 0;
-    int connected_socketId[MAX_CLIENTS];
+    int Connected_SocketID[MAX_CLIENTS];
 
     while (1)
     {
         bzero((char *)&client_addr, sizeof(client_addr));
         client_len = sizeof(client_addr);
-        client_socketId = accept(proxy_socketId, (struct sockaddr *)&client_addr, (socklen_t *)&client_len);
-        if (client_socketId < 0)
+        client_socketID = accept(proxy_socketId, (struct sockaddr *)&client_addr, (socklen_t *)&client_len);
+        if (client_socketID < 0)
         {
-            perror("Error connecting with client\n");
+            printf("❌ Error: Connection attempt failed.\n");
             exit(1);
         }
         else
         {
-            connected_socketId[i] = client_socketId;
+            Connected_SocketID[i] = client_socketID;
         }
+
         struct sockaddr_in *client_pt = (struct sockaddr_in *)&client_addr;
         struct in_addr ip_addr = client_pt->sin_addr;
         char str[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &ip_addr, str, INET_ADDRSTRLEN);
-        printf("Client is connected with port number %d and ip address %s\n", ntohs(client_addr.sin_port), str);
+        inet_ntop(AF_INET, &ip_addr, str, INET6_ADDRSTRLEN);
+        printf("✅ Client connected! Port: %d, IP: %s\n", ntohs(client_addr.sin_port), str);
 
-        pthread_create(&tid[i], NULL, thread_fn, (void *)&connected_socketId[i]);
+        pthread_create(&tid[i], NULL, thread_fn, (void *)&Connected_SocketID[i]);
         i++;
     }
+
     close(proxy_socketId);
     return 0;
-}
-
-cache_element *find(char *url)
-{
-    cache_element *site = NULL;
-    int temp_lock_val = pthread_mutex_lock(&lock);
-    printf("Remove Cache Lock Acquired %d\n", temp_lock_val);
-    if (head != NULL)
-    {
-        site = head;
-        while (site != NULL)
-        {
-            if (strcmp(site->url, url) == 0)
-            {
-                printf("LRU time track before: %ld\n", site->lru_time_track);
-                printf("\nURL Found\n");
-                site->lru_time_track = time(NULL);
-                printf("LRU time track after: %ld\n", site->lru_time_track);
-                break;
-            }
-            site = site->next;
-        }
-    }
-    else
-    {
-        printf("\nURL Not Found\n");
-    }
-    temp_lock_val = pthread_mutex_unlock(&lock);
-    printf("Remove Cache Lock Unlocked: %d\n", temp_lock_val);
-    return site;
-}
-
-int add_cache_element(char *data, int size, char *url)
-{
-    int temp_lock_val = pthread_mutex_lock(&lock);
-    printf("Add Cache Lock Acquired: %d\n", temp_lock_val);
-
-    int element_size = size + 1 + strlen(url) + sizeof(cache_element); // size of the new element which will be added to the cache
-    if (element_size > MAX_ELEMENT_SIZE)
-    {
-        // don't add the element to the cache
-        temp_lock_val = pthread_mutex_unlock(&lock);
-        printf("Add Cache Lock Unlocked: %d\n", temp_lock_val);
-        return 0;
-    }
-    else
-    {
-        while (cache_size + size > MAX_SIZE)
-        {
-
-            remove_cache_element();
-        }
-        cache_element *element = (cache_element *)malloc(sizeof(cache_element));
-        element->data = (char *)malloc(size + 1);
-        strcpy(element->data, data);
-        element->url = (char *)malloc(1 + (strlen(url) * sizeof(char)));
-        strcpy(element->url, url);
-        element->lru_time_track = time(NULL);
-        element->next = head;
-        element->len = size;
-        head = element;
-        cache_size += element_size;
-        temp_lock_val = pthread_mutex_unlock(&lock);
-        printf("Add Cache Lock Unlocked: %d\n", temp_lock_val);
-        return 1;
-    }
-    return 0;
-}
-
-void remove_cache_element()
-{
-    // if cache is not empty it searches for the node which has the least lru_time_track and deletes it
-    cache_element *p;
-    cache_element *q;
-    cache_element *temp;
-    int temp_lock_val = pthread_mutex_lock(&lock);
-    printf("Remove Cache Lock Acquired: %d\n", temp_lock_val);
-    if (head != NULL)
-    {
-        for (p = head, q = head, temp = head; q->next != NULL; q = q->next)
-        {
-            if (((q->next)->lru_time_track) < (temp->lru_time_track))
-            {
-                temp = q->next;
-                p = q;
-            }
-        }
-        if (temp == head)
-        {
-            head = head->next;
-        }
-        else
-        {
-            p->next = temp->next;
-        }
-        cache_size = cache_size - temp->len - sizeof(cache_element) - strlen(temp->url) - 1;
-        free(temp->data);
-        free(temp->url);
-        free(temp);
-    }
-    temp_lock_val = pthread_mutex_unlock(&lock);
-    printf("Remove Cache Lock Unlocked: %d\n", temp_lock_val);
 }
